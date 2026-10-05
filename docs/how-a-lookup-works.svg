@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1364" width="1000" height="1364" role="img" aria-label="How one QueryLookup call works in dns/dnscache.go. The name is cleaned (lowercase, trailing dot stripped, empty becomes the root), and a CNAME-type query returns an empty slice at once. Otherwise each round first gives up with nil once depth exceeds the number of dots in the name, then returns the cached record on a fresh cache hit. On a miss, bestNS strips leading labels until it finds a cached NS record, ending at the root that initRoot planted (a.root-servers.net, 198.41.0.4). The cache keeps only the last NS stored for a name, so if that NS has no cached A record the lookup returns nil with no fallback. Otherwise getServerComm makes a manager (never stored, so a new one every time), a serverDNSRequest is sent, and the reply is awaited for 3 seconds; a timeout leaves msg nil and the next statement panics. Every record in the reply is cached for one year, one record per call, so the same name and type keep only the last. Non-empty answers are returned as-is, a CNAME answer included and never chased. Empty answers (a referral, or an NXNAME or SERVFAIL reply, since the RCODE is never read) recurse with depth plus one.">
+  <style>
+    .bg{fill:#ffffff}
+    .title{fill:#1f2328;font:600 22px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .sub{fill:#59636e;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .lbl{fill:#1f2328;font:600 14px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .note{fill:#59636e;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .glbl{fill:#59636e;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;letter-spacing:.06em}
+    .elbl{fill:#59636e;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .edge{stroke:#818b98;stroke-width:1.6;fill:none}
+    .edge-dash{stroke:#818b98;stroke-width:1.6;fill:none;stroke-dasharray:6 4}
+    .arrow{fill:#818b98}
+    .group{fill:none;stroke:#d1d9e0;stroke-width:1.2;stroke-dasharray:4 4}
+    .b-blue{fill:#ddf4ff;stroke:#54aeff;stroke-width:1.5}
+    .b-green{fill:#dafbe1;stroke:#4ac26b;stroke-width:1.5}
+    .b-purple{fill:#fbefff;stroke:#c297ff;stroke-width:1.5}
+    .b-orange{fill:#fff1e5;stroke:#fb8f44;stroke-width:1.5}
+    .b-gray{fill:#f6f8fa;stroke:#d1d9e0;stroke-width:1.5}
+    .b-red{fill:#ffebe9;stroke:#ff8182;stroke-width:1.5}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117}
+      .title,.lbl{fill:#e6edf3}
+      .sub,.note,.glbl,.elbl{fill:#9198a1}
+      .edge,.edge-dash{stroke:#9198a1}
+      .arrow{fill:#9198a1}
+      .group{stroke:#3d444d}
+      .b-blue{fill:#0c2d6b;stroke:#4493f8}
+      .b-green{fill:#0f3b1e;stroke:#3fb950}
+      .b-purple{fill:#2e1a4f;stroke:#ab7df8}
+      .b-orange{fill:#3d1f0a;stroke:#f0883e}
+      .b-gray{fill:#151b23;stroke:#3d444d}
+      .b-red{fill:#3c1618;stroke:#f85149}
+    }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrow" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1000" height="1364" rx="12"/>
+  <text class="title" x="32" y="48">DNSResolver — how a lookup works</text>
+  <text class="sub" x="32" y="74">One QueryLookup call: each round checks the cache, asks one nameserver, caches its reply, then returns or recurses.</text>
+
+  <!-- ===== entry ===== -->
+  <rect class="b-blue" x="90" y="96" width="420" height="72" rx="10"/>
+  <text class="lbl" x="300" y="119" text-anchor="middle">QueryLookup(name, t)</text>
+  <text class="note" x="300" y="137" text-anchor="middle">cleanName: lowercase, strip the trailing dot, "" becomes "."</text>
+  <text class="note" x="300" y="154" text-anchor="middle">the tests call it with t = RTYPE_A</text>
+  <path class="edge" d="M300,168 V182" marker-end="url(#ah)"/>
+
+  <polygon class="b-gray" points="300,186 450,216 300,246 150,216"/>
+  <text class="lbl" x="300" y="221" text-anchor="middle">t == RTYPE_CNAME?</text>
+  <path class="edge" d="M450,216 H596" marker-end="url(#ah)"/>
+  <text class="elbl" x="523" y="208" text-anchor="middle">yes</text>
+  <rect class="b-orange" x="600" y="180" width="340" height="72" rx="10"/>
+  <text class="lbl" x="770" y="203" text-anchor="middle">return an empty slice</text>
+  <text class="note" x="770" y="221" text-anchor="middle">[]*DNSAnswer{}, not nil</text>
+  <text class="note" x="770" y="238" text-anchor="middle">direct CNAME queries are not resolved</text>
+  <path class="edge" d="M300,246 V302" marker-end="url(#ah)"/>
+  <text class="elbl" x="310" y="262">no — first round at depth 0</text>
+
+  <!-- ===== one round ===== -->
+  <rect class="group" x="40" y="272" width="920" height="994" rx="12"/>
+  <text class="glbl" x="944" y="292" text-anchor="end">EACH ROUND — QueryLookupWithDepth(name, depth)</text>
+
+  <polygon class="b-gray" points="300,306 450,336 300,366 150,336"/>
+  <text class="lbl" x="300" y="341" text-anchor="middle">depth &gt; dots in name?</text>
+  <path class="edge" d="M450,336 H596" marker-end="url(#ah)"/>
+  <text class="elbl" x="523" y="328" text-anchor="middle">yes</text>
+  <rect class="b-orange" x="600" y="308" width="340" height="56" rx="10"/>
+  <text class="lbl" x="770" y="331" text-anchor="middle">return nil — depth bound</text>
+  <text class="note" x="770" y="349" text-anchor="middle">www.example.com has 2 dots: depths 0, 1, 2 run</text>
+  <path class="edge" d="M300,366 V396" marker-end="url(#ah)"/>
+  <text class="elbl" x="310" y="386">no</text>
+
+  <polygon class="b-gray" points="300,400 450,430 300,460 150,430"/>
+  <text class="lbl" x="300" y="435" text-anchor="middle">cache hit for (name, t)?</text>
+  <path class="edge" d="M450,430 H596" marker-end="url(#ah)"/>
+  <text class="elbl" x="523" y="422" text-anchor="middle">yes</text>
+  <rect class="b-orange" x="600" y="394" width="340" height="72" rx="10"/>
+  <text class="lbl" x="770" y="417" text-anchor="middle">return the cached record</text>
+  <text class="note" x="770" y="435" text-anchor="middle">cacheLookup: not expired and non-empty</text>
+  <text class="note" x="770" y="452" text-anchor="middle">wrapped as one DNSAnswer{name, t, IN}</text>
+  <path class="edge" d="M300,460 V490" marker-end="url(#ah)"/>
+  <text class="elbl" x="310" y="480">no — miss</text>
+
+  <rect class="b-green" x="90" y="494" width="420" height="72" rx="10"/>
+  <text class="lbl" x="300" y="517" text-anchor="middle">bestNS(name)</text>
+  <text class="note" x="300" y="535" text-anchor="middle">strip leading labels until a cached NS record appears</text>
+  <text class="note" x="300" y="552" text-anchor="middle">www.example.com → example.com → com → .</text>
+
+  <rect class="b-green" x="600" y="494" width="340" height="72" rx="10"/>
+  <text class="lbl" x="770" y="517" text-anchor="middle">root bootstrap — initRoot</text>
+  <text class="note" x="770" y="535" text-anchor="middle">"." → NS a.root-servers.net → A 198.41.0.4</text>
+  <text class="note" x="770" y="552" text-anchor="middle">planted by InitCache · expires in 1 year</text>
+  <path class="edge-dash" d="M600,530 H514" marker-end="url(#ah)"/>
+  <text class="elbl" x="557" y="508" text-anchor="middle">cold walk</text>
+  <text class="elbl" x="557" y="521" text-anchor="middle">ends here</text>
+  <path class="edge" d="M300,566 V596" marker-end="url(#ah)"/>
+
+  <polygon class="b-gray" points="300,600 450,630 300,660 150,630"/>
+  <text class="lbl" x="300" y="635" text-anchor="middle">that NS has a cached A?</text>
+  <path class="edge" d="M450,630 H596" marker-end="url(#ah)"/>
+  <text class="elbl" x="523" y="622" text-anchor="middle">no</text>
+  <rect class="b-orange" x="600" y="594" width="340" height="72" rx="10"/>
+  <text class="lbl" x="770" y="617" text-anchor="middle">return nil — dead end</text>
+  <text class="note" x="770" y="635" text-anchor="middle">only the last NS cached is kept: no fallback</text>
+  <text class="note" x="770" y="652" text-anchor="middle">the A is only read from cache, never resolved</text>
+  <path class="edge" d="M300,660 V690" marker-end="url(#ah)"/>
+  <text class="elbl" x="310" y="680">yes</text>
+
+  <rect class="b-purple" x="90" y="694" width="420" height="72" rx="10"/>
+  <text class="lbl" x="300" y="717" text-anchor="middle">getServerComm(addr)</text>
+  <text class="note" x="300" y="735" text-anchor="middle">the manager for that server IP</text>
+  <text class="note" x="300" y="752" text-anchor="middle">never stored: every call makes a new one via commConnect</text>
+  <path class="edge" d="M300,766 V784" marker-end="url(#ah)"/>
+
+  <rect class="b-purple" x="90" y="788" width="420" height="56" rx="10"/>
+  <text class="lbl" x="300" y="811" text-anchor="middle">send serverDNSRequest</text>
+  <text class="note" x="300" y="829" text-anchor="middle">{name, t, 1-slot reply channel} on manager.requests</text>
+  <path class="edge" d="M300,844 V870" marker-end="url(#ah)"/>
+
+  <polygon class="b-gray" points="300,874 450,904 300,934 150,904"/>
+  <text class="lbl" x="300" y="909" text-anchor="middle">reply within 3 s?</text>
+  <path class="edge" d="M450,904 H596" marker-end="url(#ah)"/>
+  <text class="elbl" x="523" y="896" text-anchor="middle">no — timeout</text>
+  <rect class="b-red" x="600" y="868" width="340" height="72" rx="10"/>
+  <text class="lbl" x="770" y="891" text-anchor="middle">msg = nil → nil-pointer panic</text>
+  <text class="note" x="770" y="909" text-anchor="middle">the next statement ranges over msg.Answers</text>
+  <text class="note" x="770" y="926" text-anchor="middle">(see sharp edges)</text>
+  <path class="edge" d="M300,934 V964" marker-end="url(#ah)"/>
+  <text class="elbl" x="310" y="954">yes</text>
+
+  <rect class="b-green" x="90" y="968" width="420" height="72" rx="10"/>
+  <text class="lbl" x="300" y="991" text-anchor="middle">cacheSet every record in the reply</text>
+  <text class="note" x="300" y="1009" text-anchor="middle">answers + authorities + additionals · expires now + 1 year</text>
+  <text class="note" x="300" y="1026" text-anchor="middle">one record per call: same name + type keeps only the last</text>
+  <path class="edge" d="M300,1040 V1070" marker-end="url(#ah)"/>
+
+  <polygon class="b-gray" points="300,1074 450,1104 300,1134 150,1104"/>
+  <text class="lbl" x="300" y="1109" text-anchor="middle">msg.Answers non-empty?</text>
+  <path class="edge" d="M450,1104 H596" marker-end="url(#ah)"/>
+  <text class="elbl" x="523" y="1096" text-anchor="middle">yes</text>
+  <rect class="b-orange" x="600" y="1068" width="340" height="72" rx="10"/>
+  <text class="lbl" x="770" y="1091" text-anchor="middle">return msg.Answers</text>
+  <text class="note" x="770" y="1109" text-anchor="middle">every answer in the reply, class set to IN</text>
+  <text class="note" x="770" y="1126" text-anchor="middle">CNAME answers: returned, target never looked up</text>
+  <path class="edge" d="M300,1134 V1170" marker-end="url(#ah)"/>
+  <text class="elbl" x="310" y="1158">no — a referral, or NXNAME / SERVFAIL: the RCODE is never read</text>
+
+  <rect class="b-blue" x="90" y="1174" width="420" height="72" rx="10"/>
+  <text class="lbl" x="300" y="1197" text-anchor="middle">recurse: same name, depth + 1</text>
+  <text class="note" x="300" y="1215" text-anchor="middle">referral: bestNS now finds the zone just cached</text>
+  <text class="note" x="300" y="1232" text-anchor="middle">NXNAME: nothing new cached, the same server is asked again</text>
+  <path class="edge" d="M90,1210 H60 V336 H146" marker-end="url(#ah)"/>
+  <text class="elbl" x="68" y="328">next round</text>
+
+  <!-- ===== legend ===== -->
+  <text class="glbl" x="40" y="1296">LEGEND</text>
+  <rect class="b-blue" x="40" y="1311" width="26" height="14" rx="4"/>
+  <text class="note" x="78" y="1322">resolver step</text>
+  <rect class="b-green" x="270" y="1311" width="26" height="14" rx="4"/>
+  <text class="note" x="308" y="1322">record cache read / write</text>
+  <rect class="b-purple" x="500" y="1311" width="26" height="14" rx="4"/>
+  <text class="note" x="538" y="1322">server communication</text>
+  <rect class="b-orange" x="730" y="1311" width="26" height="14" rx="4"/>
+  <text class="note" x="768" y="1322">returns to the caller</text>
+  <rect class="b-red" x="40" y="1333" width="26" height="14" rx="4"/>
+  <text class="note" x="78" y="1344">crash</text>
+  <polygon class="b-gray" points="283,1332 297,1340 283,1348 269,1340"/>
+  <text class="note" x="308" y="1344">decision</text>
+  <path class="edge" d="M500,1340 H526" marker-end="url(#ah)"/>
+  <text class="note" x="538" y="1344">control flow</text>
+  <path class="edge-dash" d="M730,1340 H756" marker-end="url(#ah)"/>
+  <text class="note" x="768" y="1344">planted at startup</text>
+</svg>

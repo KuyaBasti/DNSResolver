@@ -1,0 +1,254 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1208" width="1000" height="1208" role="img" aria-label="DNSResolver, anatomy of a shard. Picking a shard: the query name www.Example.COM. goes through cleanName, which lowercases it and cuts one trailing dot, giving the key www.example.com; nameHash takes a 32-bit FNV-1a hash of the key and then of the seed, which is a nil slice and adds nothing, giving 0x88469fcb; modulo n = 1024 that is shard 971, the same on every run. The record cache dnsCache is a slice of n *dnsCacheUnit made once by InitCache(n). Each name is hashed on its own, so the name and its parent zones are placed independently; at n = 1024 they land in three shards: com (0xf18dd2de) in dnsCache[734], example.com (0x431ceb26) in dnsCache[806] and www.example.com (0x88469fcb) in dnsCache[971]. Every shard has its own lock, a sync.RWMutex, and its own entries map of type map[string]map[RTYPE]*dnsCacheEntry: com maps through RTYPE_NS to a *dnsCacheEntry, example.com through RTYPE_NS, www.example.com through RTYPE_A. Inside dnsCache[971]: cacheLookup takes RLock so readers share the shard, cacheSet takes Lock so a writer excludes readers and other writers, and the lock guards this shard only. The entry has expires time.Time, stamped now plus 365 days by every caller, after which cacheLookup returns nil but the entry is kept, and data []RDATA, here one A_RECORD because every call site passes one record, and each cacheSet replaces the whole entry. With n = 1 all three keys share dnsCache[0]; with n = 32, com, example.com and www.example.com are in 30, 6 and 11. A shard holds every name whose hash lands on it; one example key per shard is drawn. A shard's entries map is nil until its first cacheSet; after InitCache(1024) only shards 241 and 978 have one, from the root bootstrap.">
+  <style>
+    .bg{fill:#ffffff}
+    .title{fill:#1f2328;font:600 22px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .sub{fill:#59636e;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .lbl{fill:#1f2328;font:600 14px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .note{fill:#59636e;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .glbl{fill:#59636e;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;letter-spacing:.06em}
+    .elbl{fill:#59636e;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .edge{stroke:#818b98;stroke-width:1.6;fill:none}
+    .edge-dash{stroke:#818b98;stroke-width:1.6;fill:none;stroke-dasharray:6 4}
+    .arrow{fill:#818b98}
+    .group{fill:none;stroke:#d1d9e0;stroke-width:1.2;stroke-dasharray:4 4}
+    .b-blue{fill:#ddf4ff;stroke:#54aeff;stroke-width:1.5}
+    .b-green{fill:#dafbe1;stroke:#4ac26b;stroke-width:1.5}
+    .b-purple{fill:#fbefff;stroke:#c297ff;stroke-width:1.5}
+    .b-orange{fill:#fff1e5;stroke:#fb8f44;stroke-width:1.5}
+    .b-gray{fill:#f6f8fa;stroke:#d1d9e0;stroke-width:1.5}
+    .b-red{fill:#ffebe9;stroke:#ff8182;stroke-width:1.5}
+    .b-planned{fill:none;stroke:#818b98;stroke-width:1.4;stroke-dasharray:5 4}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .wire{stroke:#59636e;stroke-width:1.4;fill:none}
+    .dot{fill:#59636e}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117}
+      .title,.lbl{fill:#e6edf3}
+      .sub,.note,.glbl,.elbl{fill:#9198a1}
+      .edge,.edge-dash{stroke:#9198a1}
+      .arrow{fill:#9198a1}
+      .group{stroke:#3d444d}
+      .b-blue{fill:#0c2d6b;stroke:#4493f8}
+      .b-green{fill:#0f3b1e;stroke:#3fb950}
+      .b-purple{fill:#2e1a4f;stroke:#ab7df8}
+      .b-orange{fill:#3d1f0a;stroke:#f0883e}
+      .b-gray{fill:#151b23;stroke:#3d444d}
+      .b-red{fill:#3c1618;stroke:#f85149}
+      .b-planned{stroke:#9198a1}
+      .wire{stroke:#9198a1}
+      .dot{fill:#9198a1}
+    }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrow" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1000" height="1208" rx="12"/>
+  <text class="title" x="32" y="48">DNSResolver — anatomy of a shard</text>
+  <text class="sub" x="32" y="74">Each name is hashed on its own, so a name and its parent zones usually sit in different shards, under different locks.</text>
+
+  <!-- ============ (a) PICKING A SHARD ============ -->
+  <rect class="group" x="24" y="96" width="952" height="164" rx="12"/>
+  <text class="glbl" x="40" y="120">PICKING A SHARD — ONE NAME, WORKED THROUGH</text>
+  <text class="elbl mono" x="960" y="120" text-anchor="end">dnscache.go 73–74, 172–178, 191–200</text>
+
+  <rect class="b-orange" x="48" y="136" width="172" height="56" rx="10"/>
+  <text class="lbl" x="134" y="159" text-anchor="middle">query name</text>
+  <text class="note mono" x="134" y="179" text-anchor="middle">www.Example.COM.</text>
+
+  <line class="edge" x1="220" y1="164" x2="301" y2="164" marker-end="url(#ah)"/>
+  <text class="elbl mono" x="261" y="156" text-anchor="middle">cleanName</text>
+
+  <rect class="b-orange" x="302" y="136" width="172" height="56" rx="10"/>
+  <text class="lbl" x="388" y="159" text-anchor="middle">cache key</text>
+  <text class="note mono" x="388" y="179" text-anchor="middle">www.example.com</text>
+
+  <line class="edge" x1="474" y1="164" x2="555" y2="164" marker-end="url(#ah)"/>
+  <text class="elbl mono" x="515" y="156" text-anchor="middle">nameHash</text>
+
+  <rect class="b-gray" x="556" y="136" width="172" height="56" rx="10"/>
+  <text class="lbl" x="642" y="159" text-anchor="middle">32-bit hash</text>
+  <text class="note mono" x="642" y="179" text-anchor="middle">0x88469fcb</text>
+
+  <line class="edge" x1="728" y1="164" x2="809" y2="164" marker-end="url(#ah)"/>
+  <text class="elbl mono" x="769" y="156" text-anchor="middle">% n</text>
+
+  <rect class="b-blue" x="810" y="136" width="150" height="56" rx="10"/>
+  <text class="lbl" x="885" y="159" text-anchor="middle">shard index</text>
+  <text class="note mono" x="885" y="179" text-anchor="middle">971</text>
+
+  <!-- captions -->
+  <text class="note" x="134" y="214" text-anchor="middle">any case, may end in "."</text>
+  <text class="note" x="388" y="214" text-anchor="middle">lowercased, one trailing "." cut;</text>
+  <text class="note" x="388" y="232" text-anchor="middle">an empty name becomes "."</text>
+  <text class="note" x="642" y="214" text-anchor="middle">FNV-1a over the key, then over</text>
+  <text class="note" x="642" y="232" text-anchor="middle">seed: a nil slice, so 0 bytes</text>
+  <text class="note" x="885" y="214" text-anchor="middle">n = 1024 (main.go)</text>
+  <text class="note" x="885" y="232" text-anchor="middle">same index on every run</text>
+
+  <!-- ============ (b) THE SLICE AND THREE SHARDS ============ -->
+  <rect class="group" x="24" y="280" width="952" height="558" rx="12"/>
+  <text class="glbl" x="40" y="304">THE RECORD CACHE — EACH NAME HASHED ON ITS OWN</text>
+  <text class="elbl mono" x="960" y="304" text-anchor="end">dnscache.go 24–33, 39–43</text>
+
+  <!-- column headers -->
+  <text class="lbl" x="36" y="372">three keys</text>
+  <text class="note" x="36" y="390">a name and two parent zones</text>
+  <text class="lbl mono" x="262" y="344" text-anchor="middle">dnsCache</text>
+  <text class="lbl" x="318" y="372">every shard is a *dnsCacheUnit with its own lock and map</text>
+  <text class="note mono" x="318" y="390">{ lock sync.RWMutex; entries map[string]map[RTYPE]*dnsCacheEntry }</text>
+
+  <!-- the slice: n cells -->
+  <rect class="b-gray" x="232" y="359" width="60" height="34" rx="5"/>
+  <text class="note mono" x="262" y="380" text-anchor="middle">0</text>
+  <rect class="b-gray" x="232" y="399" width="60" height="34" rx="5"/>
+  <text class="lbl" x="262" y="420" text-anchor="middle">…</text>
+  <rect class="b-blue" x="232" y="439" width="60" height="34" rx="5"/>
+  <text class="lbl mono" x="254" y="461" text-anchor="middle">734</text>
+  <rect class="b-gray" x="232" y="479" width="60" height="70" rx="5"/>
+  <text class="lbl" x="262" y="518" text-anchor="middle">…</text>
+  <rect class="b-blue" x="232" y="555" width="60" height="34" rx="5"/>
+  <text class="lbl mono" x="254" y="577" text-anchor="middle">806</text>
+  <rect class="b-gray" x="232" y="595" width="60" height="70" rx="5"/>
+  <text class="lbl" x="262" y="634" text-anchor="middle">…</text>
+  <rect class="b-blue" x="232" y="671" width="60" height="34" rx="5"/>
+  <text class="lbl mono" x="254" y="693" text-anchor="middle">971</text>
+  <rect class="b-gray" x="232" y="711" width="60" height="34" rx="5"/>
+  <text class="lbl" x="262" y="732" text-anchor="middle">…</text>
+  <rect class="b-gray" x="232" y="751" width="60" height="34" rx="5"/>
+  <text class="note mono" x="262" y="772" text-anchor="middle">1023</text>
+  <text class="note mono" x="262" y="806" text-anchor="middle">[]*dnsCacheUnit</text>
+  <text class="note" x="262" y="822" text-anchor="middle">length n, made by InitCache(n)</text>
+
+  <!-- row 1: com -> 734 -->
+  <rect class="b-orange" x="36" y="430" width="146" height="52" rx="8"/>
+  <text class="lbl mono" x="109" y="452" text-anchor="middle">com</text>
+  <text class="note mono" x="109" y="470" text-anchor="middle">0xf18dd2de</text>
+  <line class="edge" x1="182" y1="456" x2="231" y2="456" marker-end="url(#ah)"/>
+  <text class="elbl" x="207" y="448" text-anchor="middle">% 1024</text>
+  <circle class="dot" cx="284" cy="456" r="3"/>
+  <line class="edge" x1="284" y1="456" x2="317" y2="456" marker-end="url(#ah)"/>
+
+  <rect class="b-blue" x="318" y="408" width="634" height="96" rx="10"/>
+  <text class="lbl mono" x="334" y="438">dnsCache[734]</text>
+  <text class="lbl mono" x="508" y="438">entries</text>
+  <rect class="b-gray" x="334" y="452" width="156" height="34" rx="6"/>
+  <text class="lbl mono" x="346" y="474">lock</text>
+  <text class="note mono" x="388" y="474">sync.RWMutex</text>
+  <rect class="b-orange" x="508" y="452" width="146" height="34" rx="6"/>
+  <text class="lbl mono" x="581" y="474" text-anchor="middle">com</text>
+  <line class="edge" x1="654" y1="469" x2="679" y2="469" marker-end="url(#ah)"/>
+  <rect class="b-orange" x="680" y="452" width="92" height="34" rx="6"/>
+  <text class="lbl mono" x="726" y="474" text-anchor="middle">RTYPE_NS</text>
+  <line class="edge" x1="772" y1="469" x2="797" y2="469" marker-end="url(#ah)"/>
+  <rect class="b-green" x="798" y="452" width="140" height="34" rx="6"/>
+  <text class="lbl mono" x="868" y="474" text-anchor="middle">*dnsCacheEntry</text>
+
+  <!-- row 2: example.com -> 806 -->
+  <rect class="b-orange" x="36" y="546" width="146" height="52" rx="8"/>
+  <text class="lbl mono" x="109" y="568" text-anchor="middle">example.com</text>
+  <text class="note mono" x="109" y="586" text-anchor="middle">0x431ceb26</text>
+  <line class="edge" x1="182" y1="572" x2="231" y2="572" marker-end="url(#ah)"/>
+  <text class="elbl" x="207" y="564" text-anchor="middle">% 1024</text>
+  <circle class="dot" cx="284" cy="572" r="3"/>
+  <line class="edge" x1="284" y1="572" x2="317" y2="572" marker-end="url(#ah)"/>
+
+  <rect class="b-blue" x="318" y="524" width="634" height="96" rx="10"/>
+  <text class="lbl mono" x="334" y="554">dnsCache[806]</text>
+  <text class="lbl mono" x="508" y="554">entries</text>
+  <rect class="b-gray" x="334" y="568" width="156" height="34" rx="6"/>
+  <text class="lbl mono" x="346" y="590">lock</text>
+  <text class="note mono" x="388" y="590">sync.RWMutex</text>
+  <rect class="b-orange" x="508" y="568" width="146" height="34" rx="6"/>
+  <text class="lbl mono" x="581" y="590" text-anchor="middle">example.com</text>
+  <line class="edge" x1="654" y1="585" x2="679" y2="585" marker-end="url(#ah)"/>
+  <rect class="b-orange" x="680" y="568" width="92" height="34" rx="6"/>
+  <text class="lbl mono" x="726" y="590" text-anchor="middle">RTYPE_NS</text>
+  <line class="edge" x1="772" y1="585" x2="797" y2="585" marker-end="url(#ah)"/>
+  <rect class="b-green" x="798" y="568" width="140" height="34" rx="6"/>
+  <text class="lbl mono" x="868" y="590" text-anchor="middle">*dnsCacheEntry</text>
+
+  <!-- row 3: www.example.com -> 971 -->
+  <rect class="b-orange" x="36" y="662" width="146" height="52" rx="8"/>
+  <text class="lbl mono" x="109" y="684" text-anchor="middle">www.example.com</text>
+  <text class="note mono" x="109" y="702" text-anchor="middle">0x88469fcb</text>
+  <line class="edge" x1="182" y1="688" x2="231" y2="688" marker-end="url(#ah)"/>
+  <text class="elbl" x="207" y="680" text-anchor="middle">% 1024</text>
+  <circle class="dot" cx="284" cy="688" r="3"/>
+  <line class="edge" x1="284" y1="688" x2="317" y2="688" marker-end="url(#ah)"/>
+
+  <rect class="b-blue" x="318" y="640" width="634" height="96" rx="10"/>
+  <text class="lbl mono" x="334" y="670">dnsCache[971]</text>
+  <text class="lbl mono" x="508" y="670">entries</text>
+  <rect class="b-gray" x="334" y="684" width="156" height="34" rx="6"/>
+  <text class="lbl mono" x="346" y="706">lock</text>
+  <text class="note mono" x="388" y="706">sync.RWMutex</text>
+  <rect class="b-orange" x="508" y="684" width="146" height="34" rx="6"/>
+  <text class="lbl mono" x="581" y="706" text-anchor="middle">www.example.com</text>
+  <line class="edge" x1="654" y1="701" x2="679" y2="701" marker-end="url(#ah)"/>
+  <rect class="b-orange" x="680" y="684" width="92" height="34" rx="6"/>
+  <text class="lbl mono" x="726" y="706" text-anchor="middle">RTYPE_A</text>
+  <line class="edge" x1="772" y1="701" x2="797" y2="701" marker-end="url(#ah)"/>
+  <rect class="b-green" x="798" y="684" width="140" height="34" rx="6"/>
+  <text class="lbl mono" x="868" y="706" text-anchor="middle">*dnsCacheEntry</text>
+
+  <!-- zoom: row 3's lock and entry, drawn larger below -->
+  <line class="edge-dash" x1="412" y1="718" x2="412" y2="897" marker-end="url(#ah)"/>
+  <line class="edge-dash" x1="868" y1="718" x2="868" y2="897" marker-end="url(#ah)"/>
+
+  <!-- ============ (c) INSIDE ONE SHARD ============ -->
+  <rect class="group" x="24" y="858" width="952" height="226" rx="12"/>
+  <text class="glbl" x="40" y="882">INSIDE dnsCache[971]</text>
+  <text class="elbl mono" x="852" y="882" text-anchor="end">dnscache.go 14–17, 154–160</text>
+
+  <!-- the lock -->
+  <rect class="b-gray" x="48" y="898" width="412" height="170" rx="10"/>
+  <text class="lbl mono" x="64" y="924">lock</text>
+  <text class="note mono" x="106" y="924">sync.RWMutex</text>
+  <text class="note" x="444" y="924" text-anchor="end">guards this shard only</text>
+  <line class="b-gray" x1="48" y1="940" x2="460" y2="940"/>
+  <text class="lbl mono" x="64" y="964">cacheLookup → RLock</text>
+  <text class="elbl mono" x="444" y="964" text-anchor="end">:78</text>
+  <text class="note" x="64" y="982">readers share: lookups here run side by side</text>
+  <line class="b-gray" x1="48" y1="998" x2="460" y2="998"/>
+  <text class="lbl mono" x="64" y="1022">cacheSet → Lock</text>
+  <text class="elbl mono" x="444" y="1022" text-anchor="end">:111</text>
+  <text class="note" x="64" y="1040">a writer excludes readers and other writers</text>
+
+  <!-- the entry -->
+  <rect class="b-green" x="484" y="898" width="468" height="170" rx="10"/>
+  <text class="lbl mono" x="500" y="924">*dnsCacheEntry</text>
+  <text class="note mono" x="632" y="924">entries["www.example.com"][RTYPE_A]</text>
+
+  <rect class="b-gray" x="500" y="938" width="436" height="54" rx="6"/>
+  <line class="b-gray" x1="620" y1="938" x2="620" y2="992"/>
+  <text class="lbl mono" x="512" y="961">expires</text>
+  <text class="note mono" x="512" y="979">time.Time</text>
+  <text class="note" x="634" y="961">every caller stamps now + 365 days</text>
+  <text class="note" x="634" y="979">expired → cacheLookup gives nil; entry is kept</text>
+
+  <rect class="b-gray" x="500" y="1000" width="436" height="54" rx="6"/>
+  <line class="b-gray" x1="620" y1="1000" x2="620" y2="1054"/>
+  <text class="lbl mono" x="512" y="1023">data</text>
+  <text class="note mono" x="512" y="1041">[]RDATA</text>
+  <text class="note" x="634" y="1023">one A_RECORD: every call site passes one</text>
+  <text class="note" x="634" y="1041">cacheSet swaps in a new entry: last write wins</text>
+
+  <!-- ============ legend + notes ============ -->
+  <rect class="b-orange" x="32" y="1101" width="14" height="14" rx="3"/>
+  <text class="note" x="54" y="1112">names and RTYPEs, the two map-key levels</text>
+  <rect class="b-blue" x="316" y="1101" width="14" height="14" rx="3"/>
+  <text class="note" x="338" y="1112">one shard (*dnsCacheUnit)</text>
+  <rect class="b-green" x="520" y="1101" width="14" height="14" rx="3"/>
+  <text class="note" x="542" y="1112">a cached entry</text>
+  <line class="edge-dash" x1="660" y1="1108" x2="690" y2="1108" marker-end="url(#ah)"/>
+  <text class="note" x="700" y="1112">drawn larger below</text>
+
+  <circle class="dot" cx="38" cy="1138" r="2.5"/>
+  <text class="note" x="50" y="1142">Shard numbers are for n = 1024. With n = 1 (TestBasic) all three keys share dnsCache[0] and one lock; with n = 32 the rows land in 30, 6 and 11.</text>
+  <circle class="dot" cx="38" cy="1160" r="2.5"/>
+  <text class="note" x="50" y="1164">A shard's entries map is nil until its first cacheSet: after InitCache(1024) only shards 241 (".") and 978 (a.root-servers.net) have one.</text>
+  <circle class="dot" cx="38" cy="1182" r="2.5"/>
+  <text class="note" x="50" y="1186">A shard's map holds every name whose hash lands on it, under that one lock; only one example key per shard is drawn here.</text>
+</svg>

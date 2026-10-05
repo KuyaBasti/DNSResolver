@@ -20,77 +20,7 @@ per-layer detail, building, and running.
 
 ## End-to-end flowchart
 
-```mermaid
-flowchart TD
-    %% ===== Callers =====
-    subgraph CALLERS["Callers — one goroutine per query"]
-        test["test suite / future server<br/>QueryLookup(name, RTYPE_A)"]:::caller
-    end
-
-    %% ===== Resolver =====
-    subgraph RESOLVER["The resolution loop — dns/dnscache.go"]
-        clean["cleanName<br/>lowercase, strip trailing dot"]:::stage
-        lookup["cacheLookup(name, type)<br/>fresh? → answer"]:::stage
-        best["bestNS(name)<br/>strip leading labels until<br/>a cached NS set appears"]:::stage
-        glue["cacheLookup(ns, A)<br/>glue must already be cached"]:::stage
-        ask["one round trip<br/>send request, select on<br/>response vs 3 s timer"]:::stage
-        learn["cacheSet × everything<br/>answers + authorities + additionals<br/>stamped now + 1 year"]:::stage
-        recurse["no answers? recurse —<br/>depth bounded by dot count"]:::stage
-    end
-
-    %% ===== Caches =====
-    subgraph CACHE["Two sharded caches — FNV-1a % n picks the shard"]
-        rcache["record cache — dnsCache<br/>shard: RWMutex +<br/>entries[name][RTYPE] → {expires, RDATA[]}"]:::cache
-        boot["bootstrap — initRoot<br/>'.' → NS a.root-servers.net<br/>a.root-servers.net → A 198.41.0.4"]:::cache
-        mcache["manager cache — serverCommCache<br/>shard: RWMutex +<br/>entries[netip.Addr] → manager<br/>(write path never stores — every miss dials)"]:::planned
-    end
-
-    %% ===== Comm =====
-    subgraph COMM["Server communication — channels, no locks on the hot path"]
-        mgr["serverCommManager<br/>remote addr + requests chan"]:::comm
-        connect["commConnect — package variable<br/>the entire network seam"]:::comm
-        listener["dnslistener.go — empty<br/>real UDP listener never landed"]:::planned
-    end
-
-    %% ===== Mock =====
-    subgraph MOCK["The mock internet — dns/dnscache_test.go"]
-        simple["simpleCommManager<br/>goroutine per manager,<br/>goroutine per request"]:::mock
-        result["get_result — role by IP:<br/>root → TLD referral + glue<br/>mid → deeper referral or answer<br/>unknown → silence (timeout)"]:::mock
-        snap[("JSON snapshots — data/<br/>names / nameservers / cnames / nxnames<br/>bulk: 102,913 names, 84,879 zones")]:::data
-    end
-
-    test --> clean --> lookup
-    lookup -- "miss" --> best --> glue --> ask
-    ask --> learn --> recurse
-    recurse -. "re-enter with<br/>smarter cache" .-> lookup
-    lookup -- "hit" --> test
-
-    lookup <--> rcache
-    boot --> rcache
-    learn --> rcache
-    best <--> rcache
-    ask -- "getServerComm(addr)" --> mcache
-    mcache -- "dials via" --> connect
-    connect -. "tests assign<br/>simpleCommManager" .-> simple
-    ask -- "serverDNSRequest on<br/>manager.requests" --> mgr
-    mgr -- "channel drained by" --> simple
-    simple --> result
-    snap --> result
-    result -- "DNSMessage over<br/>response channel" --> ask
-
-    %% ===== Styles =====
-    classDef caller fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A,stroke-width:2px;
-    classDef stage fill:#E6F1FB,stroke:#185FA5,color:#0C447C;
-    classDef cache fill:#E1F5EE,stroke:#0F6E56,color:#085041,stroke-width:2px;
-    classDef comm fill:#EEEDFE,stroke:#534AB7,color:#3C3489,stroke-width:2px;
-    classDef mock fill:#FDEBEC,stroke:#B3261E,color:#8C1D18;
-    classDef data fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
-    classDef planned fill:#F6F6F4,stroke:#888780,color:#5F5E5A,stroke-dasharray:5 4;
-```
-
-**Legend** — ⬜ callers / data · 🟦 resolution loop · 🟩 record cache ·
-🟪 server communication · 🟥 mock internet (test-only) ·
-◌ dashed = present but unwired (the manager-cache store, the listener).
+<p align="center"><img src="docs/system-design-flowchart.svg" alt="DNSResolver end-to-end flowchart. Only the Go tests call QueryLookup; main.go only runs InitCache(1024), and dnslistener.go holds nothing but its package line. QueryLookup cleans the name and returns an empty slice for CNAME queries. Each round then gives up with nil once depth exceeds the dots in the name, returns a fresh cache hit, or asks bestNS for the most specific cached NS entry, whose address must already be cached (otherwise nil). getServerComm read-locks a shard of the manager cache, which is never written, so every round trip takes the write lock and gets a new serverCommManager from the commConnect function variable, which the tests set to the mock simpleCommManager. The request goes over the manager's channel to the mock's get_result, which answers by IP role from the JSON snapshots on the request's response channel, or stays silent if it cannot place the name. No reply within 3 s leaves msg nil and panics. Every returned record is cached for one year under the shard write lock, last write wins; non-empty answers are returned, otherwise the lookup recurses with depth plus one, NXNAME replies included." width="100%"></p>
 
 ---
 
@@ -113,11 +43,12 @@ flowchart TD
    one. Readers of a warm shard share the lock; writers exclude only their own
    shard. There is no global lock anywhere, and correctness never depends on
    *which* concurrent writer wins — competing `cacheSet`s race one-record
-   slices for the same key, and any surviving record is a valid next hop. The
-   tests hammer the manager cache at 1 and 1024 shards and the bulk-lookup
-   stress at 1024 and again at 32: the 1-shard case is the adversarial
-   configuration where every operation collides on one lock and latent race
-   bugs have nowhere to hide.
+   slices for the same key. The catch is that the surviving NS is a next hop
+   only if its glue was also cached: when the last NS listed has no glue,
+   the lookup dead-ends. The tests hammer the manager cache at 1 and 1024
+   shards and the bulk-lookup stress at 1024 and again at 32: the 1-shard case
+   is the adversarial configuration where every operation collides on one lock
+   and latent race bugs have nowhere to hide.
 
 3. **The network is a variable.** The only way out of the process is
    `commConnect`, a package-level `func(*netip.Addr) *serverCommManager`.
@@ -125,10 +56,10 @@ flowchart TD
    fabricates a nameserver per IP out of JSON snapshots and serves it over
    channels — goroutine per server, goroutine per request. Unresolvable names
    are answered with *silence* — the mock's way of simulating a dead server,
-   leaving the resolver's 3-second timer as the only defense. (No test
-   actually queries such a name; if one did, the timeout path would panic —
-   see the sharp edges.) The resolver cannot tell a mock from a socket, which
-   is the point.
+   leaving the resolver's 3-second timer as the only defense. (The bulk
+   stress tests do sometimes query such a name, and the timeout path then
+   panics — see the sharp edges.) The resolver cannot tell a mock from a
+   socket, which is the point.
 
 ---
 
@@ -137,48 +68,16 @@ flowchart TD
 `TestBasic` resolves `www.mvirtualnet.com.br` against the 50-lookups snapshot,
 starting from a cache that knows only the root — three round trips:
 
-```mermaid
-sequenceDiagram
-    participant T as caller goroutine
-    participant R as QueryLookup
-    participant C as record cache
-    participant M as comm managers
-    participant N as mock internet
-
-    T->>R: QueryLookup("www.mvirtualnet.com.br", A)
-    R->>C: cacheLookup(name, A)
-    C-->>R: miss
-    R->>C: bestNS — walk to "." (bootstrapped)
-    R->>C: cacheLookup("a.root-servers.net", A)
-    C-->>R: 198.41.0.4 (bootstrapped)
-    R->>M: getServerComm(198.41.0.4)
-    M->>N: serverDNSRequest{name, A}
-    N-->>R: referral — Authorities: NS br (a.dns.br … f.dns.br)<br/>Additionals: their glue A records
-    R->>C: cacheSet everything (now + 1 year)
-    Note over R: Answers empty → recurse, depth 1
-    R->>C: bestNS — now finds "br"
-    R->>C: cacheLookup(that NS, A) — glue hit
-    R->>M: getServerComm(br server)
-    M->>N: serverDNSRequest{name, A}
-    N-->>R: deeper referral — Authorities: NS mvirtualnet.com.br<br/>(ns1/ns2), Additionals: glue 191.241.52.28/.29
-    R->>C: cacheSet everything (now + 1 year)
-    Note over R: Answers empty → recurse, depth 2
-    R->>C: bestNS — now finds "mvirtualnet.com.br"
-    R->>C: cacheLookup(that NS, A) — glue hit
-    R->>M: getServerComm(authoritative server)
-    M->>N: serverDNSRequest{name, A}
-    N-->>R: answer — A 191.241.53.61
-    R->>C: cacheSet answer
-    R-->>T: []*DNSAnswer{191.241.53.61}
-```
+<p align="center"><img src="docs/cold-lookup.svg" alt="DNSResolver, one cold lookup end to end, as a 25-step sequence across the caller goroutine, QueryLookup, the record cache, the comm managers and three mock servers from dnscache_test.go (root, br TLD, authoritative). Before the lookup, initRoot plants the root NS a.root-servers.net at 198.41.0.4. TestBasic calls QueryLookup for www.mvirtualnet.com.br. Hop 1, depth 0: the cache misses, bestNS falls back to the root, getServerComm misses and makes a new manager through commConnect because managers are never stored, and QueryLookup sends the request on manager.requests and waits up to 3 seconds; a timeout would leave the message nil and panic. The root refers to six br nameservers with glue; each record is cached alone for a year, so only f.dns.br survives as the br NS. Hop 2, depth 1: it asks f.dns.br at 200.219.159.10, which refers to mvirtualnet.com.br (ns1 and ns2, glue 191.241.52.28 and .29); only ns2 is kept. Hop 3, depth 2: it asks ns2 at 191.241.52.29, which answers A 191.241.53.61; the answer is cached for a year and returned to the caller as a DNSAnswer with class IN." width="100%"></p>
 
 Things worth noticing:
 
 - **The referral shape is load-bearing.** The mock's `create_ns` puts NS
   records in *Authorities* and glue addresses in *Additionals* — the same
   split real DNS uses — and the resolver's cache-everything step is what
-  converts that shape into progress. Drop the glue from the cache and step 2
-  of the next round dead-ends.
+  converts that shape into progress. Drop the glue from the cache and the
+  next round's address lookup (step 12 above; step 2 of the README's
+  resolution loop) dead-ends.
 - **The depth bound is the dot count.** `www.mvirtualnet.com.br` has three
   dots, so at most four rounds (depths 0–3) can run — matching the deepest
   possible delegation chain for a name of that shape; this trace used three
@@ -190,24 +89,7 @@ Things worth noticing:
 
 ## Deep dive 2 — anatomy of a shard
 
-```text
-        dnsCache  ────────────  []*dnsCacheUnit, length n (InitCache)
-            │
-            │   shard = FNV-1a(lowercase name) % n
-            ▼
-        ┌─────────────────────────────────────────────┐
-        │  dnsCacheUnit                               │
-        │  lock  sync.RWMutex ── readers share,       │
-        │                        writers exclude      │
-        │  entries                                    │
-        │    "www.example.com" ─► RTYPE_A  ─► entry   │
-        │    "example.com"     ─► RTYPE_NS ─► entry   │
-        │    "com"             ─► RTYPE_NS ─► entry   │
-        │                                             │
-        │  entry = { expires time.Time                │
-        │            data    []RDATA }                │
-        └─────────────────────────────────────────────┘
-```
+<p align="center"><img src="docs/shard-anatomy.svg" alt="DNSResolver, anatomy of a shard. Picking a shard: the query name www.Example.COM. goes through cleanName, which lowercases it and cuts one trailing dot, giving the key www.example.com; nameHash takes a 32-bit FNV-1a hash of the key and then of the seed, which is a nil slice and adds nothing, giving 0x88469fcb; modulo n = 1024 that is shard 971, the same on every run. The record cache dnsCache is a slice of n *dnsCacheUnit made once by InitCache(n). Each name is hashed on its own, so the name and its parent zones are placed independently; at n = 1024 they land in three shards: com (0xf18dd2de) in dnsCache[734], example.com (0x431ceb26) in dnsCache[806] and www.example.com (0x88469fcb) in dnsCache[971]. Every shard has its own lock, a sync.RWMutex, and its own entries map of type map[string]map[RTYPE]*dnsCacheEntry: com maps through RTYPE_NS to a *dnsCacheEntry, example.com through RTYPE_NS, www.example.com through RTYPE_A. Inside dnsCache[971]: cacheLookup takes RLock so readers share the shard, cacheSet takes Lock so a writer excludes readers and other writers, and the lock guards this shard only. The entry has expires time.Time, stamped now plus 365 days by every caller, after which cacheLookup returns nil but the entry is kept, and data []RDATA, here one A_RECORD because every call site passes one record, and each cacheSet replaces the whole entry. With n = 1 all three keys share dnsCache[0]; with n = 32, com, example.com and www.example.com are in 30, 6 and 11. A shard holds every name whose hash lands on it; one example key per shard is drawn. A shard's entries map is nil until its first cacheSet; after InitCache(1024) only shards 241 and 978 have one, from the root bootstrap." width="100%"></p>
 
 - **Keys are canonical**: `cleanName` lowercases and strips the trailing dot
   (`""` becomes `"."`, the root), and both `cacheLookup` and `cacheSet` clean
@@ -224,8 +106,9 @@ Things worth noticing:
 
 The manager cache (`serverCommCache`) mirrors this layout — shards, RWMutex,
 one-level `map[netip.Addr]*serverCommManager` — but its write path is
-unfinished: `establishServerComm` locks, dials, and returns without either
-re-checking or storing, so every miss creates a fresh manager and goroutine.
+unfinished: `establishServerComm` locks, calls `commConnect`, and returns
+without either re-checking or storing, so every miss creates a fresh manager
+and goroutine.
 The harness's duplicate-manager detector would catch this, except it never
 records managers either. Two unwired safety nets, canceling out.
 
@@ -276,11 +159,14 @@ records managers either. Two unwired safety nets, canceling out.
 | 3 | `TestBasic` | one cold recursive lookup end to end — `www.mvirtualnet.com.br` → `191.241.53.61` |
 | 4 | `TestGetCommManager` | manager cache hammered 50 rounds × {1, 1024 shards} × {1, 100 goroutines per server}, then a bulk round — races have nowhere to hide |
 | 5 | `TestCacheLookups` | bootstrapped records are served straight from the cache |
-| 6 | `TestLotsLookups` / `TestLotsLookups2` | 4,097 concurrent lookups against the 85,000-zone bulk snapshot, at 1024 and again at 32 shards, 5 s per-lookup deadline |
+| 6 | `TestLotsLookups` / `TestLotsLookups2` | 4,097 concurrent lookups against the 85,000-zone bulk snapshot, at 1024 and again at 32 shards; fails if 5 s pass without any lookup completing |
 
 The full suite runs in ~19 s (`go test ./dns -v`), dominated by the
-`TestGetCommManager` hammer; the race detector passes on the lookup tests
-(`go test ./dns -race -run 'TestBasic|TestCacheLookups|TestLotsLookups2'`).
+`TestGetCommManager` hammer, but it is not reliably green: `TestLotsLookups`
+and `TestLotsLookups2` intermittently query a name the mock leaves
+unanswered and panic on the timeout path (see the sharp edges). The race
+detector passes on the small lookup tests
+(`go test ./dns -race -run 'TestBasic|TestCacheLookups'`).
 
 ---
 
@@ -289,27 +175,31 @@ The full suite runs in ~19 s (`go test ./dns -v`), dominated by the
 - **Cache-as-world-model over explicit resolution state** — radically simple
   and naturally shared across concurrent queries, but it means resolution
   correctness *depends* on caching policy: the loop only advances because
-  referrals and glue are cached, and the address lookup in step 2 refuses to
-  recurse — an NS without cached glue is a dead end rather than a sub-lookup.
+  referrals and glue are cached, and the cached address lookup after `bestNS`
+  (step 2 of the README's resolution loop; steps 12 and 20 in the cold-lookup
+  diagram) refuses to recurse — an NS without cached glue is a dead end rather
+  than a sub-lookup.
 - **Depth-by-dot-count over loop detection** — no cycle bookkeeping at all,
   at the cost of giving up early on delegation chains longer than the name is
   deep (rare in practice, impossible in the test data).
 - **Last-writer-wins caching over entry merging** — `cacheSet` replaces the
   RDATA slice wholesale, and `QueryLookup` caches each referral record as its
   own one-element slice, so even a single referral's six NS records overwrite
-  one another and the zone entry keeps only the last. Any surviving record is
-  a valid next hop, which is why the workloads here never notice.
+  one another and the zone entry keeps only the last. The surviving NS is
+  usable only if its glue was cached; zones whose last-listed NS has no glue
+  dead-end on a cold cache (29 of the 78 zones in `50-lookups.json`).
 - **A 1-year uniform TTL over real TTL plumbing** — `DNSAnswer` has no TTL
   field, so the resolver invents one. Combined with lazy expiry and no
   eviction, the cache only ever grows; fine for a test-driven homework
   process, unbounded for a daemon.
-- **The unfinished manager store** — every query dials a fresh manager
-  (goroutine included), so the sharded manager cache currently provides
+- **The unfinished manager store** — every round trip creates a fresh
+  manager (goroutine included), so the sharded manager cache currently provides
   sharding without caching. Correct behavior, but an unbounded leak — one
   manager and one permanent goroutine per round trip.
 - **The timeout path is a trap** — a server that stays silent for 3 seconds
-  leads straight to a nil-pointer panic on `msg.Answers`. The mock *does*
-  simulate dead servers, but only for names the tests never query.
+  leads straight to a nil-pointer panic on `msg.Answers`. The mock simulates
+  dead servers, and the bulk stress tests intermittently hit one and crash
+  here, which makes them flaky.
 - **Determinism where randomness was intended** — the unseeded hash (see deep
   dive 2) removes the anti-hotspot defense but makes shard placement
   reproducible, which is arguably a debugging feature in a homework setting.
