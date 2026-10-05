@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 668" width="1000" height="668" role="img" aria-label="DNSResolver system overview. Test goroutines, one per lookup and up to 4,097 at once, call QueryLookup(name, RTYPE_A); main.go only runs InitCache. QueryLookup is a loop that makes one round trip per pass, with depth bounded by the dots in the name. It reads the sharded record cache (FNV-1a of the name mod n shards, each an RWMutex plus map) through cacheLookup and bestNS, and writes every record of each reply back with a 1-year TTL. initRoot seeds that cache with the root NS and A 198.41.0.4. For each round trip the loop asks serverCommCache for a manager by address; that cache is never written, so every lookup misses and commConnect creates a new serverCommManager with its own requests channel. The loop sends a serverDNSRequest and the DNSMessage reply comes back on the request's own response channel. If no reply arrives within 3 seconds, msg stays nil and the loop panics, which shows up in the stress tests. In the tests commConnect is simpleCommManager, a mock internet built by loadJsonFile from JSON snapshots (50-lookups.json, 227 names; bulk.json, 102,913 names) that maps each server IP to the zones it serves. Example walk: root server 198.41.0.4 refers to br with glue, the br server refers to mvirtualnet.com.br, which answers A 191.241.53.61. No real DNS network is wired up: there is no socket code and dnslistener.go is empty.">
+  <style>
+    .bg{fill:#ffffff}
+    .title{fill:#1f2328;font:600 22px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .sub{fill:#59636e;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .lbl{fill:#1f2328;font:600 14px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .note{fill:#59636e;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .glbl{fill:#59636e;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;letter-spacing:.06em}
+    .elbl{fill:#59636e;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    .edge{stroke:#818b98;stroke-width:1.6;fill:none}
+    .edge-dash{stroke:#818b98;stroke-width:1.6;fill:none;stroke-dasharray:6 4}
+    .arrow{fill:#818b98}
+    .group{fill:none;stroke:#d1d9e0;stroke-width:1.2;stroke-dasharray:4 4}
+    .b-blue{fill:#ddf4ff;stroke:#54aeff;stroke-width:1.5}
+    .b-green{fill:#dafbe1;stroke:#4ac26b;stroke-width:1.5}
+    .b-purple{fill:#fbefff;stroke:#c297ff;stroke-width:1.5}
+    .b-orange{fill:#fff1e5;stroke:#fb8f44;stroke-width:1.5}
+    .b-gray{fill:#f6f8fa;stroke:#d1d9e0;stroke-width:1.5}
+    .b-red{fill:#ffebe9;stroke:#ff8182;stroke-width:1.5}
+    .b-planned{fill:none;stroke:#818b98;stroke-width:1.4;stroke-dasharray:5 4}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117}
+      .title,.lbl{fill:#e6edf3}
+      .sub,.note,.glbl,.elbl{fill:#9198a1}
+      .edge,.edge-dash{stroke:#9198a1}
+      .arrow{fill:#9198a1}
+      .group{stroke:#3d444d}
+      .b-blue{fill:#0c2d6b;stroke:#4493f8}
+      .b-green{fill:#0f3b1e;stroke:#3fb950}
+      .b-purple{fill:#2e1a4f;stroke:#ab7df8}
+      .b-orange{fill:#3d1f0a;stroke:#f0883e}
+      .b-gray{fill:#151b23;stroke:#3d444d}
+      .b-red{fill:#3c1618;stroke:#f85149}
+      .b-planned{stroke:#9198a1}
+    }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrow" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1000" height="668" rx="12"/>
+  <text class="title" x="32" y="48">DNSResolver — system overview</text>
+  <text class="sub" x="32" y="74">Concurrent recursive resolver in Go: walks down from the root, and every reply teaches a sharded cache.</text>
+
+  <!-- ===== Callers: only test goroutines call QueryLookup (main.go just runs InitCache) ===== -->
+  <rect class="b-orange" x="32" y="124" width="184" height="76" rx="10"/>
+  <text class="lbl" x="124" y="150" text-anchor="middle">Test goroutines</text>
+  <text class="note" x="124" y="169" text-anchor="middle">one per lookup, ≤ 4,097</text>
+  <text class="note" x="124" y="188" text-anchor="middle">main.go: InitCache only</text>
+
+  <path class="edge" d="M124,202 V242" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text class="elbl" x="116" y="219" text-anchor="end">QueryLookup</text>
+  <text class="elbl" x="116" y="233" text-anchor="end">(name, RTYPE_A)</text>
+
+  <!-- ===== Resolution loop ===== -->
+  <rect class="b-green" x="32" y="244" width="184" height="76" rx="10"/>
+  <text class="lbl" x="124" y="270" text-anchor="middle">QueryLookup loop</text>
+  <text class="note" x="124" y="289" text-anchor="middle">one round trip per pass</text>
+  <text class="note" x="124" y="308" text-anchor="middle">depth ≤ dots in name</text>
+
+  <!-- timeout path: msg stays nil and the next line ranges over msg.Answers -->
+  <path class="edge" d="M92,322 V366" marker-end="url(#ah)"/>
+  <rect class="b-red" x="32" y="368" width="144" height="76" rx="10"/>
+  <text class="lbl" x="104" y="394" text-anchor="middle">No reply in 3 s</text>
+  <text class="note" x="104" y="413" text-anchor="middle">msg nil → panic</text>
+  <text class="note" x="104" y="432" text-anchor="middle">seen in stress tests</text>
+
+  <!-- loop <-> record cache -->
+  <path class="edge" d="M196,322 V474" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text class="elbl" x="206" y="384">cacheLookup · bestNS</text>
+  <text class="elbl" x="206" y="404">cacheSet every record</text>
+  <text class="elbl" x="206" y="418">1-year TTL</text>
+
+  <!-- ===== Sharded record cache ===== -->
+  <rect class="group" x="24" y="476" width="276" height="112" rx="12"/>
+  <text class="glbl" x="40" y="496">RECORD CACHE · FNV-1a(name) % n</text>
+
+  <rect class="b-gray" x="36" y="508" width="116" height="60" rx="10"/>
+  <text class="lbl" x="94" y="533" text-anchor="middle">shard 0</text>
+  <text class="note" x="94" y="552" text-anchor="middle">RWMutex + map</text>
+
+  <text class="lbl" x="162" y="542" text-anchor="middle">…</text>
+
+  <rect class="b-gray" x="172" y="508" width="116" height="60" rx="10"/>
+  <text class="lbl" x="230" y="533" text-anchor="middle">shard n−1</text>
+  <text class="note" x="230" y="552" text-anchor="middle">RWMutex + map</text>
+
+  <!-- bootstrap seeds the record cache with the single root -->
+  <path class="edge" d="M350,538 H304" marker-end="url(#ah)"/>
+  <text class="elbl" x="326" y="530" text-anchor="middle">seeds</text>
+
+  <rect class="b-gray" x="352" y="508" width="188" height="60" rx="10"/>
+  <text class="lbl" x="446" y="533" text-anchor="middle">initRoot bootstrap</text>
+  <text class="note" x="446" y="552" text-anchor="middle">root NS + A 198.41.0.4</text>
+
+  <!-- ===== Server communication ===== -->
+  <rect class="group" x="336" y="92" width="220" height="400" rx="12"/>
+  <text class="glbl" x="352" y="112">SERVER COMM · CHANNELS</text>
+
+  <!-- loop -> serverCommCache -->
+  <path class="edge" d="M218,258 H290 V162 H348" marker-end="url(#ah)"/>
+  <text class="elbl" x="282" y="222" text-anchor="end">getServerComm(addr)</text>
+
+  <rect class="b-red" x="352" y="124" width="188" height="76" rx="10"/>
+  <text class="lbl" x="446" y="150" text-anchor="middle">serverCommCache</text>
+  <text class="note" x="446" y="169" text-anchor="middle">sharded addr → manager</text>
+  <text class="note" x="446" y="188" text-anchor="middle">never written → misses</text>
+
+  <path class="edge" d="M446,202 V250" marker-end="url(#ah)"/>
+  <text class="elbl" x="456" y="222">miss →</text>
+  <text class="elbl" x="456" y="236">commConnect</text>
+
+  <rect class="b-blue" x="352" y="252" width="188" height="56" rx="10"/>
+  <text class="lbl" x="446" y="276" text-anchor="middle">serverCommManager</text>
+  <text class="note" x="446" y="295" text-anchor="middle">requests chan · new per trip</text>
+
+  <rect class="b-blue" x="352" y="336" width="188" height="56" rx="10"/>
+  <text class="lbl" x="446" y="360" text-anchor="middle">serverCommManager</text>
+  <text class="note" x="446" y="379" text-anchor="middle">requests chan · new per trip</text>
+
+  <rect class="b-blue" x="352" y="420" width="188" height="56" rx="10"/>
+  <text class="lbl" x="446" y="444" text-anchor="middle">serverCommManager</text>
+  <text class="note" x="446" y="463" text-anchor="middle">requests chan · new per trip</text>
+
+  <!-- loop <-> managers: request on manager.requests, reply on the request's own channel -->
+  <path class="edge" d="M218,290 H334" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text class="elbl" x="276" y="282" text-anchor="middle">serverDNSRequest</text>
+  <text class="elbl" x="276" y="306" text-anchor="middle">DNSMessage reply</text>
+  <text class="elbl" x="276" y="320" text-anchor="middle">on req.response</text>
+
+  <!-- ===== commConnect seam: tests plug in the mock; a real network was never built ===== -->
+  <path class="edge-dash" d="M650,486 V162 H756" marker-end="url(#ah)"/>
+  <text class="elbl" x="703" y="154" text-anchor="middle">not wired</text>
+  <text class="elbl" x="650" y="508" text-anchor="middle">commConnect seam</text>
+  <text class="elbl" x="650" y="522" text-anchor="middle">tests: simpleCommManager</text>
+
+  <rect class="b-planned" x="760" y="124" width="200" height="76" rx="10"/>
+  <text class="lbl" x="860" y="150" text-anchor="middle">Real DNS network</text>
+  <text class="note" x="860" y="169" text-anchor="middle">not built: no socket code</text>
+  <text class="note" x="860" y="188" text-anchor="middle">dnslistener.go is empty</text>
+
+  <!-- per-round-trip exchanges -->
+  <path class="edge" d="M542,280 H758" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text class="elbl" x="598" y="272" text-anchor="middle">round trip 1</text>
+  <path class="edge" d="M542,364 H758" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text class="elbl" x="598" y="356" text-anchor="middle">round trip 2</text>
+  <path class="edge" d="M542,448 H758" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text class="elbl" x="598" y="440" text-anchor="middle">round trip 3</text>
+
+  <!-- ===== Mock internet (test code) ===== -->
+  <rect class="group" x="744" y="216" width="232" height="396" rx="12"/>
+  <text class="glbl" x="760" y="236">MOCK INTERNET (TESTS)</text>
+
+  <rect class="b-purple" x="760" y="252" width="200" height="56" rx="10"/>
+  <text class="lbl" x="860" y="276" text-anchor="middle">Root server 198.41.0.4</text>
+  <text class="note" x="860" y="295" text-anchor="middle">referral: NS br + glue</text>
+
+  <path class="edge-dash" d="M860,310 V334" marker-end="url(#ah)"/>
+  <text class="elbl" x="870" y="326">delegates</text>
+
+  <rect class="b-purple" x="760" y="336" width="200" height="56" rx="10"/>
+  <text class="lbl" x="860" y="360" text-anchor="middle">br TLD server</text>
+  <text class="note" x="860" y="379" text-anchor="middle">referral: NS + glue</text>
+
+  <path class="edge-dash" d="M860,394 V418" marker-end="url(#ah)"/>
+  <text class="elbl" x="870" y="410">delegates</text>
+
+  <rect class="b-purple" x="760" y="420" width="200" height="56" rx="10"/>
+  <text class="lbl" x="860" y="444" text-anchor="middle">mvirtualnet.com.br NS</text>
+  <text class="note" x="860" y="463" text-anchor="middle">answer: A 191.241.53.61</text>
+
+  <path class="edge-dash" d="M860,518 V480" marker-end="url(#ah)"/>
+  <text class="elbl" x="870" y="496">loadJsonFile:</text>
+  <text class="elbl" x="870" y="510">server IP → zones</text>
+
+  <rect class="b-gray" x="760" y="520" width="200" height="76" rx="10"/>
+  <text class="lbl" x="860" y="546" text-anchor="middle">JSON snapshots (data/)</text>
+  <text class="note" x="860" y="565" text-anchor="middle">50-lookups.json: 227 names</text>
+  <text class="note" x="860" y="584" text-anchor="middle">bulk.json: 102,913 names</text>
+
+  <!-- ===== Legend ===== -->
+  <text class="glbl" x="32" y="642">LEGEND</text>
+  <rect class="b-red" x="104" y="630" width="26" height="14" rx="4"/>
+  <text class="note" x="140" y="641">bug in the current code</text>
+  <rect class="b-planned" x="310" y="630" width="26" height="14" rx="4"/>
+  <text class="note" x="346" y="641">not built</text>
+  <path class="edge-dash" d="M440,637 H466" marker-end="url(#ah)"/>
+  <text class="note" x="478" y="641">no direct call: delegation, data load, plug-in seam</text>
+</svg>
