@@ -10,7 +10,7 @@
 > now one delegation deeper, so the next round starts closer to the answer.
 > Recursion is bounded by the number of labels in the name; the network is a
 > single swappable function variable, replaced in tests by a **mock internet**
-> of a hundred thousand records that answers over channels.
+> of over a hundred thousand names that answers over channels.
 
 This document is the developer-facing map of the whole system — every component
 and how data moves between them. The companion [README](README.md) covers the
@@ -41,7 +41,7 @@ per-layer detail, building, and running.
    and server managers) are slices of independent shards, each a plain Go map
    behind its own `RWMutex`; FNV-1a of the key modulo the shard count picks
    one. Readers of a warm shard share the lock; writers exclude only their own
-   shard. There is no global lock anywhere, and correctness never depends on
+   shard. There is no global lock in either cache (the test mock's `simpleCommManager` does take one, `commLock`, for every manager it builds), and correctness never depends on
    *which* concurrent writer wins — competing `cacheSet`s race one-record
    slices for the same key. The catch is that the surviving NS is a next hop
    only if its glue was also cached: when the last NS listed has no glue,
@@ -54,8 +54,8 @@ per-layer detail, building, and running.
    `commConnect`, a package-level `func(*netip.Addr) *serverCommManager`.
    Production would dial UDP; the tests assign `simpleCommManager`, which
    fabricates a nameserver per IP out of JSON snapshots and serves it over
-   channels — goroutine per server, goroutine per request. Unresolvable names
-   are answered with *silence* — the mock's way of simulating a dead server,
+   channels — goroutine per server, goroutine per request. Names the mock
+   cannot place in any zone it knows are answered with *silence* — the mock's way of simulating a dead server,
    leaving the resolver's 3-second timer as the only defense. (The bulk
    stress tests do sometimes query such a name, and the timeout path then
    panics — see the sharp edges.) The resolver cannot tell a mock from a
@@ -96,7 +96,7 @@ Things worth noticing:
   before hashing — so `www.Example.COM.` and `www.example.com` are one entry.
 - **Expiry is lazy**: `cacheLookup` returns `nil` for a stale entry but never
   deletes it; there is no eviction of any kind. With everything stamped
-  one year out, the cache is effectively append-only for a process lifetime.
+  one year out, the cache effectively never shrinks for a process lifetime — entries are only added or overwritten.
 - **The maps are born lazily**: a shard starts with a `nil` map; the first
   `cacheSet` on it allocates both levels under the write lock.
 - **The hash seed is inert**: FNV-1a is *supposed* to be salted with
@@ -155,9 +155,9 @@ records managers either. Two unwired safety nets, canceling out.
 | Stage | Test | What it proves |
 |---|---|---|
 | 1 | `TestJSON`, `TestSOA_RECORD_String`, `TestNameHash` | a `DNSQuestion` decodes from JSON, `SOA_RECORD` formats correctly, hashing is stable and case-insensitive |
-| 2 | `TestCommManager` | the mock hierarchy responds at every level when walked by hand (root referral, authoritative answer, TLD referral) — printed for inspection, no assertions |
+| 2 | `TestCommManager` | the mock hierarchy responds at every level when walked by hand (root referral, authoritative answer, TLD referral). The first two replies are printed for inspection; the third is received and discarded. No assertions |
 | 3 | `TestBasic` | one cold recursive lookup end to end — `www.mvirtualnet.com.br` → `191.241.53.61` |
-| 4 | `TestGetCommManager` | manager cache hammered 50 rounds × {1, 1024 shards} × {1, 100 goroutines per server}, then a bulk round — races have nowhere to hide |
+| 4 | `TestGetCommManager` | manager cache hammered 50 rounds × {1, 1024 shards} × {1, 100 goroutines per server}, then a bulk round — every call must return a manager for the requested address, with no 5 s stall; the duplicate-manager check never fires (see above), so the missing store goes unnoticed |
 | 5 | `TestCacheLookups` | bootstrapped records are served straight from the cache |
 | 6 | `TestLotsLookups` / `TestLotsLookups2` | 4,097 concurrent lookups against the 85,000-zone bulk snapshot, at 1024 and again at 32 shards; fails if 5 s pass without any lookup completing |
 
@@ -184,7 +184,7 @@ detector passes on the small lookup tests
   deep (rare in practice, impossible in the test data).
 - **Last-writer-wins caching over entry merging** — `cacheSet` replaces the
   RDATA slice wholesale, and `QueryLookup` caches each referral record as its
-  own one-element slice, so even a single referral's six NS records overwrite
+  own one-element slice, so even a single referral's NS records (six for `br` in deep dive 1) overwrite
   one another and the zone entry keeps only the last. The surviving NS is
   usable only if its glue was cached; zones whose last-listed NS has no glue
   dead-end on a cold cache (29 of the 78 zones in `50-lookups.json`).
